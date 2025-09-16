@@ -82,62 +82,94 @@ private OAuthAuthenticationSuccessHandler oAuthSuccessHandler;
 ## 🟠 **4. Implement `OAuthAuthenticationSuccessHandler`**
 
 ```java
+
+
 @Component
 public class OAuthAuthenticationSuccessHandler implements AuthenticationSuccessHandler {
+
+    private static final Logger logger = LoggerFactory.getLogger(OAuthAuthenticationSuccessHandler.class);
 
     @Autowired
     private UserRepo userRepo;
 
+    // === STEP : 1 ===> 
+    // This code only handles the redirection after a successful OAuth login. 
+    // It does not save or update user information in the database because:
+    // This method is called when OAuth login is successful
     @Override
     public void onAuthenticationSuccess(HttpServletRequest request, HttpServletResponse response,
-                                        Authentication authentication) throws IOException {
+            Authentication authentication) throws IOException, ServletException {
+
+        logger.info("OAuthAuthenticationSuccessHandler invoked");
+
+        // Cast Authentication object to OAuth2AuthenticationToken to access provider info
         OAuth2AuthenticationToken oauthToken = (OAuth2AuthenticationToken) authentication;
-        DefaultOAuth2User oauthUser = (DefaultOAuth2User) oauthToken.getPrincipal();
-        String provider = oauthToken.getAuthorizedClientRegistrationId().toLowerCase();
+        String providerId = oauthToken.getAuthorizedClientRegistrationId();
+        DefaultOAuth2User oauthUser = (DefaultOAuth2User) authentication.getPrincipal();
 
-        User user = mapOAuthUserToUser(oauthUser, provider);
+        logger.info("OAuth Provider: {}", providerId);
+        oauthUser.getAttributes().forEach((key, value) -> logger.info("{} : {}", key, value));
 
-        // Save user if not exists
+        // Map OAuth2 user attributes to our application's User entity
+        User user = buildUserFromOAuth(providerId, oauthUser);
+
+        // Save user if not already exists
         User existingUser = userRepo.findByEmail(user.getEmail()).orElse(null);
         if (existingUser == null) {
             userRepo.save(user);
+            logger.info("New user saved: {}", user.getEmail());
         }
 
         // Redirect to user profile
         new DefaultRedirectStrategy().sendRedirect(request, response, "/user/profile");
     }
 
-    private User mapOAuthUserToUser(DefaultOAuth2User oauthUser, String provider) {
+    // === STEP : 2 ===>
+    // Helper method: Convert OAuth2 attributes to User entity means save data in DB
+    private User buildUserFromOAuth(String providerId, DefaultOAuth2User oauthUser) {
         User user = new User();
         user.setUserId(UUID.randomUUID().toString());
         user.setRoleList(List.of(AppConstant.ROLE_USER));
-        user.setEnabled(true);
         user.setEmailVerified(true);
-        user.setPassword("dummy"); // OAuth users usually don’t need a password
+        user.setEnabled(true);
+        user.setPassword("dummy"); // Since OAuth handles authentication - users usually don't need a password
 
-        switch (provider) {
-            case "google" -> {
+        switch (providerId.toLowerCase()) {
+            case "google":
                 user.setEmail(oauthUser.getAttribute("email"));
                 user.setName(oauthUser.getAttribute("name"));
                 user.setProfilePic(oauthUser.getAttribute("picture"));
                 user.setProviderUserId(oauthUser.getName());
                 user.setProvider(Providers.GOOGLE);
                 user.setAbout("This account is created using Google.");
-            }
-            case "github" -> {
-                user.setEmail(oauthUser.getAttribute("email"));
-                user.setName(oauthUser.getAttribute("name"));
+                break;
+
+            case "github":
+                String email = oauthUser.getAttribute("email") != null
+                        ? oauthUser.getAttribute("email")
+                        : oauthUser.getAttribute("login") + "@gmail.com";
+                user.setEmail(email);
+                user.setName(oauthUser.getAttribute("login"));
                 user.setProfilePic(oauthUser.getAttribute("avatar_url"));
                 user.setProviderUserId(oauthUser.getName());
                 user.setProvider(Providers.GITHUB);
                 user.setAbout("This account is created using GitHub.");
-            }
-            default -> {}
+                break;
+
+            case "linkedin":
+                // Add LinkedIn attribute mapping here
+                logger.info("LinkedIn OAuth mapping not implemented yet.");
+                break;
+
+            default:
+                logger.warn("Unknown OAuth provider: {}", providerId);
+                break;
         }
 
         return user;
     }
 }
+
 ```
 
 **Purpose:**
