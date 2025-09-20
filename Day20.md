@@ -136,12 +136,73 @@ Keeps business logic safe from DB complexity, reusable in multiple controllers.
 ### **4️⃣ Save Contact from Controller**
 
 ```java
-@PostMapping("/contacts")
-public String saveContact(@ModelAttribute Contact contact, Model model) {
-    contactService.save(contact);   // ✅ Save data into DB
-    model.addAttribute("message", "Contact saved successfully!");
-    return "redirect:/dashboard";  // or profile page
-}
+@PostMapping("/add")
+    public String saveContact(
+            @Valid
+            @ModelAttribute ContactForm contactForm,
+            BindingResult result,
+            Authentication authentication,
+            RedirectAttributes redirectAttributes //  We useRedirectAttributes insted of Session to show message as flash
+    ) {
+
+        // 1️⃣ Validate form input
+        if (result.hasErrors()) {
+            // Log all validation errors
+            result.getAllErrors().forEach(error -> logger.warn("Validation error: {}", error));
+
+            // Add flash attribute
+            redirectAttributes.addFlashAttribute("message",
+                    Message.builder()
+                            .content("Please correct the highlighted errors.")
+                            .type(MessageType.red)
+                            .build());
+
+            // Redirect back to form
+            return "user/add_contact";
+        }
+
+        // 2️⃣ Get the logged-in user
+        String email = Helper.getLoggedInUserEmail(authentication);
+        User user = userService.getUserByEmail(email).orElse(null);
+
+        if (user == null) {
+            redirectAttributes.addFlashAttribute("message",
+                    Message.builder()
+                            .content("User not found. Please login again.")
+                            .type(MessageType.red)
+                            .build());
+            return "redirect:/login";
+        }
+
+        // 3️⃣ Convert ContactForm → Contact
+        Contact contact = new Contact();
+        contact.setName(contactForm.getName());
+        contact.setFavorite(contactForm.isFavorite());
+        contact.setEmail(contactForm.getEmail());
+        contact.setPhoneNumber(contactForm.getPhoneNumber());
+        contact.setAddress(contactForm.getAddress());
+        contact.setDescription(contactForm.getDescription());
+        contact.setLinkedInLink(contactForm.getLinkedInLink());
+        contact.setWebsiteLink(contactForm.getWebsiteLink());
+        contact.setUser(user);
+        }
+
+        //5️⃣ Save contact in DB
+        contactService.save(contact);
+
+        // 6️⃣ Set success message
+        redirectAttributes.addFlashAttribute("message",
+        Message.builder()
+               .content("You have successfully added a new contact!")
+               .type(MessageType.green)
+               .build());
+
+
+        logger.info("New contact added: {}", contact.getName());
+
+        return "redirect:/user/contacts/add";
+    }
+
 ```
 
 **Explanation**
