@@ -264,37 +264,48 @@ public class ContactForm {
 
 ### 🎛️ 3. Controller Method (Validation Only)
 
+✅ Industry Recommendation
+
+ - Use RedirectAttributes.addFlashAttribute for temporary messages after form submission + redirect.
+ - Use HttpSession only for real session data, like logged-in user info, shopping cart, etc.
+ - Most modern Spring Boot applications never use session manually for flash messages; RedirectAttributes is the standard.
+
 ```java
 @PostMapping("/add")
 public String saveContact(
         @Valid @ModelAttribute ContactForm contactForm,
         BindingResult result,
         Authentication authentication,
-        HttpSession session
+        RedirectAttributes redirectAttributes //  We useRedirectAttributes insted of Session to show message as flash
 ) {
-    // 1️⃣ Validate form
-    if (result.hasErrors()) {
-        result.getAllErrors().forEach(error -> logger.warn("Validation error: {}", error));
+    // 1️⃣ Validate form input
+        if (result.hasErrors()) {
+            // Log all validation errors
+            result.getAllErrors().forEach(error -> logger.warn("Validation error: {}", error));
 
-        session.setAttribute("message", Message.builder()
-                .content("Please correct the highlighted errors.")
-                .type(MessageType.red)
-                .build());
+            // Add flash attribute
+            redirectAttributes.addFlashAttribute("message",
+                    Message.builder()
+                            .content("Please correct the highlighted errors.")
+                            .type(MessageType.red)
+                            .build());
 
-        return "user/add_contact"; // reload form with errors
-    }
+            // Redirect back to form
+            return "user/add_contact";
+        }
 
-    // 2️⃣ Fetch logged-in user
-    String email = Helper.getLoggedInUserEmail(authentication);
-    User user = userService.getUserByEmail(email).orElse(null);
+        // 2️⃣ Get the logged-in user
+        String email = Helper.getLoggedInUserEmail(authentication);
+        User user = userService.getUserByEmail(email).orElse(null);
 
-    if (user == null) {
-        session.setAttribute("message", Message.builder()
-                .content("User not found. Please login again.")
-                .type(MessageType.red)
-                .build());
-        return "redirect:/login";
-    }
+        if (user == null) {
+            redirectAttributes.addFlashAttribute("message",
+                    Message.builder()
+                            .content("User not found. Please login again.")
+                            .type(MessageType.red)
+                            .build());
+            return "redirect:/login";
+        }
 
     // 3️⃣ Convert form → entity (but don’t save yet)
     Contact contact = new Contact();
@@ -309,17 +320,28 @@ public String saveContact(
     contact.setUser(user);
 
     // 4️⃣ Simulate success message
-    session.setAttribute("message", Message.builder()
-            .content("You have successfully added a new contact! (Not saved yet)")
-            .type(MessageType.green)
-            .build());
+    redirectAttributes.addFlashAttribute("message",
+        Message.builder()
+               .content("You have successfully added a new contact!")
+               .type(MessageType.green)
+               .build());
 
     logger.info("New contact (not saved): {}", contact);
 
     return "redirect:/user/contacts/add";
 }
 ```
+---
+### 🖼️ 2.Adding Flash Session to add_contact.html
 
+```
+<!-- ✅ Flash/Session Message goes here -->
+              <div id="flashMessage" th:if="${message}"
+                th:class="'w-full p-3 mb-4 rounded border ' + 
+               (${message.type.name()} eq 'green' ? 'border-green-400 bg-green-100 text-green-800' : 'border-red-400 bg-red-100 text-red-800')">
+                <span th:text="${message.content}"></span>
+              </div>
+```
 ---
 
 ### 🔑 Key Purpose of Each Part
