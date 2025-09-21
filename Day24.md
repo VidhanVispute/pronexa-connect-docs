@@ -25,24 +25,29 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+
 import com.pronexa.connect.entities.Contact;
 
 @Repository
 public interface ContactRepo extends JpaRepository<Contact, String> {
 
-    @Query("SELECT c FROM Contact c WHERE c.user.id = :userId")
+        @Query("SELECT c FROM Contact c WHERE c.user.id = :userId")
     Page<Contact> findByUserId(@Param("userId") String userId, Pageable pageable);
 
-    @Query("SELECT c FROM Contact c WHERE c.user.id = :userId " +
-           "AND (LOWER(c.name) LIKE LOWER(CONCAT('%', :keyword, '%')) " +
-           "OR LOWER(c.email) LIKE LOWER(CONCAT('%', :keyword, '%'))) ")
-    Page<Contact> searchByUserIdAndKeyword(@Param("userId") String userId,
-                                           @Param("keyword") String keyword,
-                                           Pageable pageable);
+    @Query("SELECT c FROM Contact c WHERE c.user.id = :userId AND LOWER(c.name) LIKE LOWER(CONCAT('%', :keyword, '%'))")
+    Page<Contact> searchByName(@Param("userId") String userId, @Param("keyword") String keyword, Pageable pageable);
+
+    @Query("SELECT c FROM Contact c WHERE c.user.id = :userId AND LOWER(c.email) LIKE LOWER(CONCAT('%', :keyword, '%'))")
+    Page<Contact> searchByEmail(@Param("userId") String userId, @Param("keyword") String keyword, Pageable pageable);
+
+    @Query("SELECT c FROM Contact c WHERE c.user.id = :userId AND " +
+           "(LOWER(c.name) LIKE LOWER(CONCAT('%', :keyword, '%')) OR LOWER(c.email) LIKE LOWER(CONCAT('%', :keyword, '%')))")
+    Page<Contact> searchByUserIdAndKeyword(@Param("userId") String userId, @Param("keyword") String keyword, Pageable pageable);
 
     @Query("SELECT c FROM Contact c WHERE c.user.id = :userId AND c.favorite = true")
     Page<Contact> findFavoritesByUserId(@Param("userId") String userId, Pageable pageable);
 }
+
 ```
 
 ---
@@ -53,21 +58,26 @@ public interface ContactRepo extends JpaRepository<Contact, String> {
 package com.pronexa.connect.services;
 
 import java.util.List;
+
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+
 import com.pronexa.connect.entities.Contact;
 
 public interface ContactService {
+
     Contact save(Contact contact);
     Contact update(Contact contact);
     List<Contact> getAll();
     Page<Contact> getByUserId(String userId, Pageable pageable);
-    void delete(String id);
-
-    // Day 24 additions
-    Page<Contact> search(String userId, String keyword, Pageable pageable);
     Page<Contact> getFavorites(String userId, Pageable pageable);
+
+    // MAIN STANDARD: single search method
+    Page<Contact> searchContacts(String userId, String keyword, String searchType, Boolean favorite, Pageable pageable);
+    void delete(String id);
 }
+
+
 ```
 
 ---
@@ -79,10 +89,11 @@ package com.pronexa.connect.services.impl;
 
 import java.util.List;
 import java.util.UUID;
+
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Service;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.stereotype.Service;
 
 import com.pronexa.connect.entities.Contact;
 import com.pronexa.connect.helpers.ResourceNotFoundException;
@@ -105,6 +116,7 @@ public class ContactServiceImpl implements ContactService {
     public Contact update(Contact contact) {
         var contactOld = contactRepo.findById(contact.getId())
                 .orElseThrow(() -> new ResourceNotFoundException("Contact not found"));
+
         contactOld.setName(contact.getName());
         contactOld.setEmail(contact.getEmail());
         contactOld.setPhoneNumber(contact.getPhoneNumber());
@@ -115,6 +127,7 @@ public class ContactServiceImpl implements ContactService {
         contactOld.setWebsiteLink(contact.getWebsiteLink());
         contactOld.setLinkedInLink(contact.getLinkedInLink());
         contactOld.setCloudinaryImagePublicId(contact.getCloudinaryImagePublicId());
+
         return contactRepo.save(contactOld);
     }
 
@@ -128,14 +141,24 @@ public class ContactServiceImpl implements ContactService {
         return contactRepo.findByUserId(userId, pageable);
     }
 
+    // Day 24: search
     @Override
-    public Page<Contact> search(String userId, String keyword, Pageable pageable) {
-        if (keyword == null || keyword.trim().isEmpty()) {
-            return contactRepo.findByUserId(userId, pageable);
+    public Page<Contact> searchContacts(String userId, String keyword, String searchType, Boolean favorite, Pageable pageable) {
+        if (favorite != null && favorite) {
+            return getFavorites(userId, pageable);
         }
-        return contactRepo.searchByUserIdAndKeyword(userId, keyword.trim(), pageable);
+        if (keyword == null || keyword.isBlank()) {
+            return getByUserId(userId, pageable);
+        }
+
+        return switch (searchType.toLowerCase()) {
+            case "name" -> contactRepo.searchByName(userId, keyword, pageable);
+            case "email" -> contactRepo.searchByEmail(userId, keyword, pageable);
+            default -> contactRepo.searchByUserIdAndKeyword(userId, keyword, pageable);
+        };
     }
 
+    // Day 24: favorites
     @Override
     public Page<Contact> getFavorites(String userId, Pageable pageable) {
         return contactRepo.findFavoritesByUserId(userId, pageable);
@@ -148,6 +171,7 @@ public class ContactServiceImpl implements ContactService {
         contactRepo.delete(contact);
     }
 }
+
 ```
 
 ---
@@ -155,8 +179,12 @@ public class ContactServiceImpl implements ContactService {
 ### **4️⃣ Controller**
 
 ```java
-package com.pronexa.connect.controllers;
+package com.pronexa.connect.controller;
 
+import java.util.UUID;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -165,58 +193,157 @@ import org.springframework.data.domain.Sort;
 import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
+import org.springframework.validation.BindingResult;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.ModelAttribute;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.servlet.mvc.support.RedirectAttributes;
 
 import com.pronexa.connect.entities.Contact;
 import com.pronexa.connect.entities.User;
+import com.pronexa.connect.forms.ContactForm;
+import com.pronexa.connect.helpers.Helper;
+import com.pronexa.connect.helpers.Message;
+import com.pronexa.connect.helpers.MessageType;
 import com.pronexa.connect.services.ContactService;
+import com.pronexa.connect.services.ImageService;
 import com.pronexa.connect.services.UserService;
-import com.pronexa.connect.utils.Helper;
+
+import jakarta.validation.Valid;
 
 @Controller
+@RequestMapping("/user/contacts")
 public class ContactController {
+
+    private final Logger logger = LoggerFactory.getLogger(ContactController.class);
 
     @Autowired
     private ContactService contactService;
 
     @Autowired
+    private ImageService imageService;
+
+    @Autowired
     private UserService userService;
 
-    @GetMapping
-    public String listContacts(
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "6") int size,
-            @RequestParam(required = false) String keyword,
-            @RequestParam(required = false) Boolean favorite,
-            Model model,
-            Authentication authentication
+    @RequestMapping("/add")
+    public String addContact(Model model) {
+        ContactForm contactForm = new ContactForm();
+        // ===== Sending backed data to form =====
+        // contactForm.setAddress("hie gurukrupa");
+        // contactForm.setFavorite(true);
+        model.addAttribute("contactForm", contactForm);
+
+        return "user/add_contact";
+    }
+
+    @PostMapping("/add")
+    public String saveContact(
+            @Valid
+            @ModelAttribute ContactForm contactForm,
+            BindingResult result,
+            Authentication authentication,
+            RedirectAttributes redirectAttributes //  We useRedirectAttributes insted of Session to show message as flash
     ) {
-        String email = Helper.getLoggedInUserEmail(authentication);
-        User user = userService.getUserByEmail(email).orElse(null);
-        if (user == null) return "redirect:/login";
 
-        Pageable pageable = PageRequest.of(page, size, Sort.by("name").ascending());
-        Page<Contact> contactsPage;
+        // 1️⃣ Validate form input
+        if (result.hasErrors()) {
+            // Log all validation errors
+            result.getAllErrors().forEach(error -> logger.warn("Validation error: {}", error));
 
-        if (keyword != null && !keyword.isBlank()) {
-            contactsPage = contactService.search(user.getId(), keyword, pageable);
-            model.addAttribute("keyword", keyword);
-        } else if (favorite != null && favorite) {
-            contactsPage = contactService.getFavorites(user.getId(), pageable);
-            model.addAttribute("favorite", true);
-        } else {
-            contactsPage = contactService.getByUserId(user.getId(), pageable);
+            // Add flash attribute
+            redirectAttributes.addFlashAttribute("message",
+                    Message.builder()
+                            .content("Please correct the highlighted errors.")
+                            .type(MessageType.red)
+                            .build());
+
+            // Redirect back to form
+            return "user/add_contact";
         }
 
-        model.addAttribute("contacts", contactsPage.getContent());
-        model.addAttribute("currentPage", page);
-        model.addAttribute("totalPages", contactsPage.getTotalPages());
-        model.addAttribute("pageSize", size);
+        // 2️⃣ Get the logged-in user
+        String email = Helper.getLoggedInUserEmail(authentication);
+        User user = userService.getUserByEmail(email).orElse(null);
 
-        return "user/contacts";
+        if (user == null) {
+            redirectAttributes.addFlashAttribute("message",
+                    Message.builder()
+                            .content("User not found. Please login again.")
+                            .type(MessageType.red)
+                            .build());
+            return "redirect:/login";
+        }
+
+        // 3️⃣ Convert ContactForm → Contact
+        Contact contact = new Contact();
+        contact.setName(contactForm.getName());
+        contact.setFavorite(contactForm.isFavorite());
+        contact.setEmail(contactForm.getEmail());
+        contact.setPhoneNumber(contactForm.getPhoneNumber());
+        contact.setAddress(contactForm.getAddress());
+        contact.setDescription(contactForm.getDescription());
+        contact.setLinkedInLink(contactForm.getLinkedInLink());
+        contact.setWebsiteLink(contactForm.getWebsiteLink());
+        contact.setUser(user);
+
+        // 4️⃣ Handle contact picture upload (if provided)
+        if (contactForm.getContactImage() != null && !contactForm.getContactImage().isEmpty()) {
+            String uniqueFileName = UUID.randomUUID().toString();
+            String imageUrl = imageService.uploadImage(contactForm.getContactImage(), uniqueFileName);// 2️⃣ Upload the image to Cloudinary using our ImageService
+            contact.setPicture(imageUrl);
+            contact.setCloudinaryImagePublicId(uniqueFileName); // 4️⃣ Save the unique public ID (filename) for later use (e.g., update or delete)
+        }
+
+        //5️⃣ Save contact in DB
+        contactService.save(contact);
+
+        // 6️⃣ Set success message
+        redirectAttributes.addFlashAttribute("message",
+                Message.builder()
+                        .content("You have successfully added a new contact!")
+                        .type(MessageType.green)
+                        .build());
+
+        logger.info("New contact added: {}", contact.getName());
+
+        return "redirect:/user/contacts/add";
     }
+
+    @GetMapping
+public String listContacts(
+        @RequestParam(defaultValue = "0") int page,
+        @RequestParam(defaultValue = "6") int size,
+        @RequestParam(required = false) String keyword,
+        @RequestParam(defaultValue = "both") String searchType,
+        @RequestParam(required = false) Boolean favorite,
+        Model model,
+        Authentication authentication
+) {
+    String email = Helper.getLoggedInUserEmail(authentication);
+    User user = userService.getUserByEmail(email)
+                           .orElseThrow(() -> new RuntimeException("User not found"));
+
+    Pageable pageable = PageRequest.of(page, size, Sort.by("name").ascending());
+
+    Page<Contact> contactsPage = contactService.searchContacts(user.getUserId(), keyword, searchType, favorite, pageable);
+
+    model.addAttribute("contacts", contactsPage.getContent());
+    model.addAttribute("currentPage", page);
+    model.addAttribute("totalPages", contactsPage.getTotalPages());
+    model.addAttribute("pageSize", size);
+    model.addAttribute("keyword", keyword);
+    model.addAttribute("searchType", searchType);
+    model.addAttribute("favorite", favorite);
+
+    return "user/contacts";
 }
+
+
+}
+
 ```
 
 ---
@@ -249,11 +376,23 @@ public class ContactController {
         <div class="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <form th:action="@{/user/contacts}" method="get" class="flex items-center gap-2">
                 <input type="hidden" name="page" value="0" />
-                <input type="text" name="keyword" th:value="${keyword}" placeholder="Search by name or email..."
+
+                <!-- keyword -->
+                <input type="text" name="keyword" th:value="${keyword}" placeholder="Search..."
                     class="px-3 py-2 border rounded-full w-64" />
+
+                <!-- search type dropdown -->
+                <select name="searchType" class="px-2 py-2 border rounded-full">
+                    <option value="name" th:selected="${searchType == 'name'}">Name</option>
+                    <option value="email" th:selected="${searchType == 'email'}">Email</option>
+                    <option value="both" th:selected="${searchType == 'both'}">Both</option>
+                </select>
+
+                <!-- buttons -->
                 <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-full">Search</button>
                 <a th:href="@{/user/contacts}" class="px-3 py-2 bg-gray-200 rounded-full ml-4">Clear</a>
             </form>
+
 
             <div class="flex items-center gap-2">
                 <a th:if="${favorite == null || !favorite}" th:href="@{/user/contacts(favorite=true)}"
